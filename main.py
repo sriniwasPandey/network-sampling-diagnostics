@@ -5,36 +5,80 @@ Demo script for network sampling diagnostics.
 - Computes ND (normalized distortion) for several metrics
   under different sampling schemes and fractions on one graph.
 - Computes mis-ranking probabilities for pairs of graphs.
-- Plots ND vs sampling fraction and p(mis-rank) vs sampling fraction.
-
-Requires:
-    sampling.py
-    metrics.py
-    nd_diagnostics.py
-    misranking.py
+- Saves results (CSVs + PNG plots) into a 'results' folder.
 """
+
+import os
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import networkx as nx
+from matplotlib.lines import Line2D  # add at top with other imports
 
-from sampling import sample_random_nodes, sample_snowball
+
+from sampling import (
+    sample_random_nodes,
+    sample_snowball,
+    sample_degree_weighted_nodes,
+    sample_uniform_edges,
+)
 from metrics import (
     metric_global_clustering,
     metric_degree_assortativity,
     metric_modularity_greedy,
+    metric_avg_shortest_path,
 )
 from nd_diagnostics import estimate_nd_grid_fast
 from misranking import estimate_misranking_grid
-
-
 # ---------------------------------------------------------------------
-# Plotting helpers
+# Global plotting style
 # ---------------------------------------------------------------------
 
-def plot_nd_vs_frac(df_nd):
+SAMPLER_COLORS = {
+    "random_node":     "tab:blue",
+    "snowball":        "tab:orange",
+    "degree_weighted": "tab:green",
+    "edge_uniform":    "tab:red",
+    # If you later add random_walk, just uncomment:
+    # "random_walk":     "tab:purple",
+}
+
+METRIC_MARKERS = {
+    "clustering":    "o",
+    "assortativity": "s",
+    "avg_path":      "D",
+    "modularity":    "^",
+}
+
+# ---------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------
+
+def ensure_output_dir(dirname: str = "results") -> Path:
     """
-    For each metric, plot ND vs sampling fraction with one line per sampler.
+    Ensure that the output directory exists and return it as a Path.
+    """
+    out_dir = Path(dirname)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def sanitize_name(name: str) -> str:
+    """
+    Make a string safe for filenames.
+    """
+    return name.replace(" ", "_").replace("/", "_")
+
+
+# ---------------------------------------------------------------------
+# Plotting helpers (now with saving)
+# ---------------------------------------------------------------------
+
+def plot_nd_vs_frac(df_nd, output_dir: Path):
+    """
+    For each metric, plot ND vs sampling fraction with one line per sampler,
+    and save each figure as PNG in output_dir.
     """
     metrics = df_nd["metric"].unique()
     samplers = df_nd["sampler"].unique()
@@ -51,12 +95,11 @@ def plot_nd_vs_frac(df_nd):
             x = s["frac"].values
             y = s["nd"].values
 
-            # drop NaNs
             mask = ~np.isnan(y)
             if not mask.any():
                 continue
-
-            ax.plot(x[mask], y[mask], marker="o", label=sampler)
+            color = SAMPLER_COLORS.get(sampler, None)
+            ax.plot(x[mask], y[mask], marker="o",color=color, label=sampler)
 
         ax.set_title(f"ND vs sampling fraction – {metric}")
         ax.set_xlabel("Sampling fraction")
@@ -65,11 +108,14 @@ def plot_nd_vs_frac(df_nd):
         ax.legend(title="Sampler")
         fig.tight_layout()
 
+        fname = output_dir / f"nd_vs_frac_{sanitize_name(metric)}.png"
+        fig.savefig(fname, dpi=300, bbox_inches="tight")
 
-def plot_misrank_vs_frac(df_mis):
+
+def plot_misrank_vs_frac(df_mis, output_dir: Path):
     """
     For each metric, plot p(mis-rank) vs sampling fraction,
-    with one line per sampler.
+    with one line per sampler, and save to output_dir.
     """
     metrics = df_mis["metric"].unique()
     samplers = df_mis["sampler"].unique()
@@ -89,8 +135,8 @@ def plot_misrank_vs_frac(df_mis):
             mask = ~np.isnan(y)
             if not mask.any():
                 continue
-
-            ax.plot(x[mask], y[mask], marker="o", label=sampler)
+            color = SAMPLER_COLORS.get(sampler, None)
+            ax.plot(x[mask], y[mask], marker="o", color=color,label=sampler)
 
         ax.set_title(f"Mis-ranking probability vs sampling fraction – {metric}")
         ax.set_xlabel("Sampling fraction")
@@ -100,18 +146,22 @@ def plot_misrank_vs_frac(df_mis):
         ax.legend(title="Sampler")
         fig.tight_layout()
 
+        fname = output_dir / f"misrank_vs_frac_{sanitize_name(metric)}.png"
+        fig.savefig(fname, dpi=300, bbox_inches="tight")
 
-def plot_nd_vs_misrank(df_nd, df_mis, frac_value: float):
+
+def plot_nd_vs_misrank(df_nd, df_mis, frac_value: float, output_dir: Path):
     """
     Scatter plot of ND vs p(mis-rank) at a fixed sampling fraction.
 
-    Each point is (ND, p_misrank) for a given metric × sampler.
+    - Color encodes sampler (consistent with other plots).
+    - Marker shape encodes metric.
+
+    Saves figure into output_dir.
     """
-    # restrict to the chosen fraction
     nd_sub = df_nd[df_nd["frac"] == frac_value]
     mis_sub = df_mis[df_mis["frac"] == frac_value]
 
-    # merge on metric + sampler
     merged = nd_sub.merge(
         mis_sub[["metric", "sampler", "p_misrank"]],
         on=["metric", "sampler"],
@@ -124,20 +174,81 @@ def plot_nd_vs_misrank(df_nd, df_mis, frac_value: float):
 
     fig, ax = plt.subplots()
 
-    for (metric, sampler), grp in merged.groupby(["metric", "sampler"]):
+    for _, row in merged.iterrows():
+        metric = row["metric"]
+        sampler = row["sampler"]
+        nd_val = row["nd"]
+        p_val = row["p_misrank"]
+
+        color = SAMPLER_COLORS.get(sampler, None)
+        marker = METRIC_MARKERS.get(metric, "o")
+
         ax.scatter(
-            grp["nd"],
-            grp["p_misrank"],
-            label=f"{metric} / {sampler}",
+            nd_val,
+            p_val,
+            color=color,
+            marker=marker,
+            s=60,
+            edgecolors="black",
+            linewidths=0.5,
         )
 
     ax.set_title(f"ND vs mis-ranking at sampling fraction = {frac_value}")
     ax.set_xlabel("ND (distortion)")
     ax.set_ylabel("p(mis-rank)")
-    #ax.set_ylim(-0.01, 1.01)
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8, bbox_to_anchor=(1.05, 1), loc="upper left")
+
+    # --- Build legends: one for samplers (colors), one for metrics (markers) ---
+    # Sampler legend
+    sampler_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color=color,
+            linestyle="",
+            label=sampler,
+        )
+        for sampler, color in SAMPLER_COLORS.items()
+        if sampler in merged["sampler"].unique()
+    ]
+
+    # Metric legend
+    metric_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=marker,
+            color="black",
+            linestyle="",
+            label=metric,
+        )
+        for metric, marker in METRIC_MARKERS.items()
+        if metric in merged["metric"].unique()
+    ]
+
+    legend1 = ax.legend(
+        handles=sampler_handles,
+        title="Sampler (color)",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1),
+        borderaxespad=0.0,
+    )
+    ax.add_artist(legend1)
+
+    ax.legend(
+        handles=metric_handles,
+        title="Metric (marker)",
+        loc="lower left",
+        bbox_to_anchor=(1.02, 0),
+        borderaxespad=0.0,
+    )
+
     fig.tight_layout()
+
+    frac_str = str(frac_value).replace(".", "p")
+    fname = output_dir / f"nd_vs_misrank_frac_{frac_str}.png"
+    fig.savefig(fname, dpi=300, bbox_inches="tight")
 
 
 # ---------------------------------------------------------------------
@@ -145,13 +256,14 @@ def plot_nd_vs_misrank(df_nd, df_mis, frac_value: float):
 # ---------------------------------------------------------------------
 
 def main():
+    # Where to save CSVs and plots
+    results_dir = ensure_output_dir("results")
+
     # -----------------------------
     # 1. Define ground-truth graphs
     # -----------------------------
-    # Single graph for ND diagnostics
     G = nx.barabasi_albert_graph(n=800, m=3, seed=1)
 
-    # Two graphs for mis-ranking: BA vs WS (or whatever you like)
     G1 = nx.barabasi_albert_graph(n=800, m=3, seed=1)
     G2 = nx.watts_strogatz_graph(n=800, k=10, p=0.1, seed=2)
 
@@ -161,18 +273,19 @@ def main():
     metrics = {
         "clustering":    metric_global_clustering,
         "assortativity": metric_degree_assortativity,
+        "avg_path":      metric_avg_shortest_path,   
         "modularity":    metric_modularity_greedy,
-        # you can add avg-path approx later if you want
     }
-
-    from sampling import sample_random_nodes, sample_snowball
 
     samplers = {
         "random_node": (sample_random_nodes, {}),
         "snowball":    (sample_snowball, {"n_seeds": 5}),
+        "degree_weighted": (sample_degree_weighted_nodes, {}),
+        "edge_uniform":    (sample_uniform_edges, {"induced": True}),
+
     }
 
-    sample_fracs = [0.1, 0.2, 0.4, 0.6]
+    sample_fracs = [0.05, 0.1, 0.2, 0.3]
 
     # -----------------------------
     # 3. Compute ND grid on G
@@ -183,10 +296,15 @@ def main():
         metrics=metrics,
         samplers=samplers,
         sample_fracs=sample_fracs,
-        n_rep=120,
+        n_rep=100,
         rng_seed=42,
     )
     print(df_nd.head())
+
+    # Save ND results
+    nd_csv_path = results_dir / "nd_results.csv"
+    df_nd.to_csv(nd_csv_path, index=False)
+    print(f"Saved ND results to {nd_csv_path}")
 
     # -----------------------------
     # 4. Compute mis-ranking grid between G1 and G2
@@ -198,24 +316,26 @@ def main():
         metrics=metrics,
         samplers=samplers,
         sample_fracs=sample_fracs,
-        n_rep=200,
+        n_rep=150,
         rng_seed=123,
     )
     print(df_mis.head())
 
+    # Save mis-ranking results
+    mis_csv_path = results_dir / "misranking_results.csv"
+    df_mis.to_csv(mis_csv_path, index=False)
+    print(f"Saved mis-ranking results to {mis_csv_path}")
+
     # -----------------------------
-    # 5. Plot results
+    # 5. Plot results and save figs
     # -----------------------------
-    # ND vs frac
-    plot_nd_vs_frac(df_nd)
+    plot_nd_vs_frac(df_nd, results_dir)
+    plot_misrank_vs_frac(df_mis, results_dir)
+    plot_nd_vs_misrank(df_nd, df_mis, frac_value=0.1, output_dir=results_dir)
 
-    # p(mis-rank) vs frac
-    plot_misrank_vs_frac(df_mis)
+    print(f"Plots saved into {results_dir.resolve()}")
 
-    # ND vs mis-rank at a specific fraction (e.g. 0.2)
-    plot_nd_vs_misrank(df_nd, df_mis, frac_value=0.2)
-
-    # Show all figures
+    # Show all figures (optional; comment out if running headless)
     plt.show()
 
 
